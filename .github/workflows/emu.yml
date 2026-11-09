@@ -489,6 +489,11 @@ jobs:
 
   artifacts-uploading:
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/openxiangshan/xs-env:ubuntu-24.04
+      volumes:
+        - /mnt:/mnt
+      options: --privileged # for swapon
     needs: changes
     if: ${{ needs.changes.outputs.core == 'true' }}
     continue-on-error: false
@@ -498,17 +503,11 @@ jobs:
       - uses: actions/checkout@v7
       - name: set env
         run: echo "NOOP_HOME=$GITHUB_WORKSPACE" >> $GITHUB_ENV
-      - name: psutil
-        run: sudo apt install python3-psutil
       - name: Initialize submodules
         run: |
           make init-force || {
             cd rocket-chip && git fetch --unshallow && cd .. && make init-force
           }
-      - name: mill
-        uses: jodersky/setup-mill@v0.3.0
-        with:
-          mill-version: 0.12.3
       - name: swapfile
         run: |
           if [ -f /mnt/swapfile ]; then
@@ -618,6 +617,7 @@ jobs:
 
   scalafmt:
     runs-on: ubuntu-latest
+    container: ghcr.io/openxiangshan/xs-env:ubuntu-24.04
     needs: changes
     if: ${{ needs.changes.outputs.core == 'true' }}
     continue-on-error: true
@@ -625,14 +625,4 @@ jobs:
     name: Check Format
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: 'recursive'
-      - uses: actions/setup-java@v5
-        with:
-          distribution: 'temurin'
-          java-version: '11'
-      - run: |
-          mkdir -p ~/.local/bin
-          sh -c "curl -L https://github.com/com-lihaoyi/mill/releases/download/0.11.7/0.11.7 > ~/.local/bin/mill && chmod +x ~/.local/bin/mill"
-          export PATH=~/.local/bin:$PATH
       - run: make check-format
