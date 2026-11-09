@@ -1,0 +1,7 @@
+{
+  "coremark-2-iteration": {
+    "ipc": 2.222589,
+    "tolerance": 0.01,
+    "note": "DefaultConfig TraceRTL emu (GSIM, DRAMsim3 XiangShan.ini); exec-mode IPC of the same build is 2.222952"
+  }
+}

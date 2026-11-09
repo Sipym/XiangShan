@@ -1,0 +1,121 @@
+# TraceRTL quick test: build the TraceRTL emu (GSIM), run the trace corner-case
+# tests and check coremark IPC against scripts/tracertl/perf-baseline.json.
+# Traces are recorded by a trace-collecting NEMU (TRACERTL_NEMU), see
+# scripts/tracertl/tracertl_ci.py.
+name: EMU TraceRTL Basic Test
+
+on:
+  push:
+    branches: [ kunminghu-v3 ]
+  pull_request:
+    branches: [ kunminghu-v3 ]
+
+env:
+  PERF_HOME: /nfs/home/ci-runner/emu-tracertl-basic/${{ github.run_number }}
+  DRAMSIM3_HOME: /nfs/home/share/ci-workloads/DRAMsim3
+  TRACERTL_NEMU: /nfs/home/share/ci-workloads/tracertl/riscv64-nemu-interpreter
+  CROSS_COMPILE: /nfs/home/share/riscv-toolchain-gcc15-240613/bin/riscv64-unknown-linux-gnu-
+
+jobs:
+  changes:
+    name: Changes Detection
+    permissions:
+      pull-requests: read
+    runs-on: ubuntu-latest
+    outputs:
+      core: ${{ steps.filter.outputs.core }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          predicate-quantifier: 'every'
+          filters: .github/filters.yaml
+
+  build:
+    name: EMU - TraceRTL - Build
+    needs: changes
+    if: ${{ needs.changes.outputs.core == 'true' }}
+    runs-on:
+      - builder
+      - node # same as EMU - GSIM: gsim is having performance issue on open servers
+    outputs:
+      cluster: ${{ steps.save.outputs.cluster }}
+    timeout-minutes: 300
+    continue-on-error: false
+    steps:
+      - name: Cleanup orphan EMU
+        run: |
+          pkill -9 -e -f ${GITHUB_WORKSPACE}/build/emu || true
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: true
+      - name: Init
+        run: |
+          mkdir -p ${PERF_HOME}
+          make init-force
+          python3 ${GITHUB_WORKSPACE}/scripts/xiangshan.py --clean
+      - name: Build TraceRTL emu
+        run: |
+          make -C ${GITHUB_WORKSPACE}/TraceRTL MODE=xiangshan SIM=gsim emu -j64 \
+            NOOP_HOME=${GITHUB_WORKSPACE} NUM_CORES=1 \
+            WITH_DRAMSIM3=1 DRAMSIM3_HOME=${DRAMSIM3_HOME} \
+            WITH_CONSTANTIN=0 WITH_CHISELDB=0 EMU_THREADS=1 EMU_OPTIMIZE=-O3
+      - name: Save artifact
+        id: save
+        # copy to the shared directory, like EMU - Basics
+        run: |
+          cp -L ${GITHUB_WORKSPACE}/build/emu ${PERF_HOME}/emu
+          if [[ $(hostname) == *.bosccluster.com ]]; then
+            echo "cluster=node" >> ${GITHUB_OUTPUT}
+          else
+            echo "cluster=open" >> ${GITHUB_OUTPUT}
+          fi
+
+  run:
+    name: EMU - TraceRTL - Run
+    needs: build
+    runs-on:
+      - ${{ needs.build.outputs.cluster }} # use same cluster as builder to avoid cross-cluster network copy
+      - runner
+    timeout-minutes: 120
+    continue-on-error: false
+    strategy:
+      matrix:
+        include:
+          # trace corner cases: exceptions, interrupts, trap target == next instruction,
+          # FP context status, start in the middle of a trace
+          - name: tests
+          # performance regression: IPC against scripts/tracertl/perf-baseline.json
+          - name: coremark
+            report-perf: true
+      fail-fast: false
+    steps:
+      - name: Cleanup orphan EMU
+        run: |
+          pkill -9 -e -f ${GITHUB_WORKSPACE}/build/emu || true
+      - uses: actions/checkout@v7
+        with:
+          submodules: true # ready-to-run holds the coremark image
+      - name: Get artifact
+        run: |
+          mkdir -p build
+          echo "Getting EMU binary from ${PERF_HOME}/emu"
+          cp -L ${PERF_HOME}/emu ${GITHUB_WORKSPACE}/build/emu
+      - name: TraceRTL Test - ${{ matrix.name }}
+        id: run
+        shell: bash
+        run: |
+          export LD_LIBRARY_PATH=${DRAMSIM3_HOME}/build:${LD_LIBRARY_PATH}
+          python3 ${GITHUB_WORKSPACE}/scripts/tracertl/tracertl_ci.py ${{ matrix.name }} \
+            --emu ${GITHUB_WORKSPACE}/build/emu \
+            --work ${GITHUB_WORKSPACE}/tracertl-${{ matrix.name }} \
+            --summary ${GITHUB_STEP_SUMMARY} \
+            ${{ matrix.report-perf && format('--ipc-out {0}/ipc-tracertl-{1}', env.PERF_HOME, matrix.name) || '' }}
+      - name: Archive log
+        if: ${{ always() && steps.run.outcome != 'skipped' }}
+        run: |
+          cd ${GITHUB_WORKSPACE}
+          tar -czvf "${PERF_HOME}/${{ matrix.name }}.tar.gz" \
+            --exclude='*.zstd' --exclude='dramsim3*' tracertl-${{ matrix.name }}
