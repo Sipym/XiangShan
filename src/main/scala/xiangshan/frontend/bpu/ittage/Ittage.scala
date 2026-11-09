@@ -248,10 +248,11 @@ class Ittage(implicit p: Parameters) extends BasePredictor with HasIttageParamet
      - collect allocation eligibility independently of provider selection
      -------------------------------------------------------------------------------------------------------------- */
 
-  private val t1_fire           = RegNext(t0_fire, init = false.B)
-  private val t1_needRead       = RegEnable(t0_needRead, false.B, t0_fire)
-  private val t1_train          = RegEnable(io.train, 0.U.asTypeOf(new Train), t0_fire)
-  private val t1_trainFoldedPhr = RegEnable(io.trainFoldedPhr, t0_fire)
+  private val t1_fire            = RegNext(t0_fire, init = false.B)
+  private val t1_needRead        = RegEnable(t0_needRead, false.B, t0_fire)
+  private val t1_train           = RegEnable(io.train, 0.U.asTypeOf(new Train), t0_fire)
+  private val t1_trainFoldedPhr  = RegEnable(io.trainFoldedPhr, t0_fire)
+  private val t1_trainBranchMask = RegEnable(t0_trainBranchMask, t0_fire)
 
   // The highest-numbered matching table has the longest history. Select the
   // provider and alternate again, since entries may have changed since prediction.
@@ -285,6 +286,7 @@ class Ittage(implicit p: Parameters) extends BasePredictor with HasIttageParamet
   private val t2_needRead        = RegEnable(t1_needRead, false.B, t1_fire)
   private val t2_train           = RegEnable(t1_train, 0.U.asTypeOf(new Train), t1_fire)
   private val t2_trainFoldedPhr  = RegEnable(t1_trainFoldedPhr, t1_fire)
+  private val t2_trainBranchMask = RegEnable(t1_trainBranchMask, t1_fire)
   private val t2_providerInfo    = RegEnable(t1_providerInfo, t1_fire)
   private val t2_altProviderInfo = RegEnable(t1_altProviderInfo, t1_fire)
   private val t2_hasProvider     = RegEnable(t1_hasProvider, false.B, t1_fire)
@@ -325,43 +327,34 @@ class Ittage(implicit p: Parameters) extends BasePredictor with HasIttageParamet
   private val t2_allocateValid = t2_needRead && t2_allocatableSlots.orR
   private val t2_allocateIdx   = Mux(t2_allocatableSlots(t2_maskedEntry), t2_maskedEntry, t2_firstEntry)
 
-  // Select the branch needed for training.
-  private val trainBranchIdxVec: Vec[Bool] = VecInit(t2_train.branches.map(b =>
-    b.valid && b.bits.attribute.needIttage && b.bits.taken
-  ))
+  // Reuse the branch selected in t0, aligned with the training bundle.
   when(t2_fire) {
     assert(
-      PopCount(trainBranchIdxVec) === 1.U,
+      PopCount(t2_trainBranchMask) === 1.U,
       "An active ITTAGE training transaction must contain exactly one selected branch"
     )
   }
-  private val trainBranchIdx: UInt = PriorityEncoder(trainBranchIdxVec)
-  private val hasTrainBranch: Bool = trainBranchIdxVec.asUInt.orR
+  private val t2_trainBranchIdx: UInt = PriorityEncoder(t2_trainBranchMask)
 
-  private val t2_updateValid = hasTrainBranch && t2_fire
+  // Use aliases for clarity
+  private val t2_updateValid = t2_fire
 
   private val t2_updateMask            = WireInit(0.U.asTypeOf(Vec(NumTables, Bool())))
   private val t2_updateUsefulCntMask   = WireInit(0.U.asTypeOf(Vec(NumTables, Bool())))
   private val t2_updateResetUsefulCnt  = WireInit(false.B)
-  private val t2_updateCorrect         = Wire(Vec(NumTables, Bool()))
-  private val t2_updateAlloc           = Wire(Vec(NumTables, Bool()))
-  private val t2_updateOldCnt          = Wire(Vec(NumTables, ConfidenceCounter()))
-  private val t2_updateUsefulCnt       = Wire(Vec(NumTables, UsefulCounter()))
-  private val t2_updateTargetOffset    = Wire(Vec(NumTables, new IttageOffset))
-  private val t2_updateOldTargetOffset = Wire(Vec(NumTables, new IttageOffset))
-  t2_updateCorrect         := DontCare
-  t2_updateAlloc           := DontCare
-  t2_updateOldCnt          := DontCare
-  t2_updateUsefulCnt       := DontCare
-  t2_updateTargetOffset    := DontCare
-  t2_updateOldTargetOffset := DontCare
+  private val t2_updateCorrect         = WireInit(0.U.asTypeOf(Vec(NumTables, Bool())))
+  private val t2_updateAlloc           = WireInit(0.U.asTypeOf(Vec(NumTables, Bool())))
+  private val t2_updateOldCnt          = WireInit(0.U.asTypeOf(Vec(NumTables, ConfidenceCounter())))
+  private val t2_updateUsefulCnt       = WireInit(0.U.asTypeOf(Vec(NumTables, UsefulCounter())))
+  private val t2_updateTargetOffset    = WireInit(0.U.asTypeOf(Vec(NumTables, new IttageOffset)))
+  private val t2_updateOldTargetOffset = WireInit(0.U.asTypeOf(Vec(NumTables, new IttageOffset)))
 
   // Use the misprediction bits from the training bundle so allocation and
   // certain updates (e.g. alt-provider penalty) only happen on actual mispreds.
-  private val t2_updateMisPred = hasTrainBranch && t2_train.branches(trainBranchIdx).bits.mispredict
+  private val t2_updateMisPred = t2_train.branches(t2_trainBranchIdx).bits.mispredict
 
   // Update in loop
-  private val t2_updateRealTarget       = t2_train.branches(trainBranchIdx).bits.target
+  private val t2_updateRealTarget       = t2_train.branches(t2_trainBranchIdx).bits.target
   private val t2_updatePCRegion         = targetGetRegion(t2_train.startPc)
   private val t2_updateRealTargetRegion = targetGetRegion(t2_updateRealTarget)
   private val t2_updateRealTargetOffset = WireInit(0.U.asTypeOf(new IttageOffset))
@@ -373,8 +366,8 @@ class Ittage(implicit p: Parameters) extends BasePredictor with HasIttageParamet
     t2_updateMask(i) && (t2_updateAlloc(i) || t2_updateOldCnt(i).isSaturateNegative)
   }.reduce(_ || _)
   t2_updateRealTargetOffset.usePcRegion := t2_updateRealUsePCRegion
-  rTable.io.writeValid               := !t2_updateRealUsePCRegion && t2_updateWritesTarget
-  rTable.io.writeRegion              := t2_updateRealTargetRegion
+  rTable.io.writeValid                  := !t2_updateRealUsePCRegion && t2_updateWritesTarget
+  rTable.io.writeRegion                 := t2_updateRealTargetRegion
   t2_updateRealTargetOffset.pointer     := rTable.io.writePointer
 
   // Retain the original SRAM target encoding when the target does not change.
@@ -558,7 +551,7 @@ class Ittage(implicit p: Parameters) extends BasePredictor with HasIttageParamet
   }
   XSDebug(
     t2_updateValid,
-    p"pc: ${Hexadecimal(t2_updateStartPc.toUInt)}, target: ${Hexadecimal(t2_train.branches(trainBranchIdx).bits.target.toUInt)}\n"
+    p"pc: ${Hexadecimal(t2_updateStartPc.toUInt)}, target: ${Hexadecimal(t2_train.branches(t2_trainBranchIdx).bits.target.toUInt)}\n"
   )
   XSDebug(
     t2_updateValid,

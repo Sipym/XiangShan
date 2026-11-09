@@ -299,7 +299,7 @@ class IttageTable(
     io.update.targetOffset,
     io.update.oldTargetOffset
   )
-  updateWdata.paddingBit := DontCare
+  updateWdata.paddingBit := 0.U
 
   // Per-table activity identifies useful history lengths and allocation pressure.
   XSPerfAccumulate("ittage_table_updates", io.update.valid)
